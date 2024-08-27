@@ -100,13 +100,16 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 					if (note != null) {
 						if (!note.isTrashed()) {
+							Instant createdInstant = Instant.EPOCH.plus(note.createdTimestampUsec(), ChronoUnit.MICROS);
+							Instant updatedInstant = Instant.EPOCH.plus(note.userEditedTimestampUsec(), ChronoUnit.MICROS);
+
 							Map<String, Object> data = new HashMap<>();
 
 							data.put("uid", Utils.randomToken());
 
 							data.put("creator_id", userId);
-							data.put("created_ts", Instant.EPOCH.plus(note.createdTimestampUsec(), ChronoUnit.MICROS));
-							data.put("updated_ts", Instant.EPOCH.plus(note.userEditedTimestampUsec(), ChronoUnit.MICROS));
+							data.put("created_ts", createdInstant);
+							data.put("updated_ts", updatedInstant);
 							data.put("row_status", note.isArchived() ? "ARCHIVED" : "NORMAL");
 
 							StringBuilder contentBuilder = new StringBuilder();
@@ -121,16 +124,19 @@ public class GoogleKeepImporter implements ApplicationRunner {
 								contentBuilder.append(note.textContent());
 
 							if (note.listContent() != null && !note.listContent().isEmpty()) {
-								note.listContent().forEach(entry -> {
-									contentBuilder.append("- [");
-									if (entry.isChecked())
-										contentBuilder.append("x");
-									else
-										contentBuilder.append(" ");
-									contentBuilder.append("] ");
-									contentBuilder.append(entry.text());
-									contentBuilder.append("\n");
-								});
+								note.listContent()
+										.stream()
+										.filter(entry -> !entry.text().isBlank())
+										.forEach(entry -> {
+											contentBuilder.append("- [");
+											if (entry.isChecked())
+												contentBuilder.append("x");
+											else
+												contentBuilder.append(" ");
+											contentBuilder.append("] ");
+											contentBuilder.append(entry.text());
+											contentBuilder.append("\n");
+										});
 							}
 
 							data.put("content", contentBuilder.toString());
@@ -153,7 +159,7 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 							boolean pinned = note.isPinned();
 
-							transactionTemplate.executeWithoutResult(transactionStatus -> {
+							Long id = transactionTemplate.execute(transactionStatus -> {
 								GeneratedKeyHolder keyHolder = new GeneratedKeyHolder();
 
 								jdbcClient.sql("""
@@ -181,7 +187,58 @@ public class GoogleKeepImporter implements ApplicationRunner {
 											.param("pinned", 1)
 											.update();
 								}
+
+								return memoId;
 							});
+
+							if (id != null) {
+								if (note.attachments() != null) {
+									// TODO arg
+									Path assetsDirectory = Path.of("/root/.memos/assets");
+
+									note.attachments().forEach(attachment -> {
+										Path attachmentFile = directory.resolve(attachment.filePath());
+
+										try {
+											long attachmentSize = Files.size(attachmentFile);
+
+											if (attachmentSize > 0L) {
+												String targetFileName = id + "-" + attachmentFile.getFileName().toString();
+
+												Files.copy(attachmentFile, assetsDirectory.resolve(targetFileName));
+
+												transactionTemplate.executeWithoutResult(transactionStatus -> {
+													Map<String, Object> attachmentData = new HashMap<>();
+
+													attachmentData.put("uid", Utils.randomToken());
+													attachmentData.put("creator_id", userId);
+													attachmentData.put("created_ts", createdInstant);
+													attachmentData.put("updated_ts", updatedInstant);
+													attachmentData.put("filename", attachmentFile.getFileName().toString());
+													attachmentData.put("type", attachment.mimetype());
+													attachmentData.put("size", attachmentSize);
+													attachmentData.put("memo_id", id);
+													attachmentData.put("storage_type", "LOCAL");
+													attachmentData.put("reference", "assets/" + targetFileName);
+													attachmentData.put("payload", "{}");
+
+													jdbcClient.sql("""
+																	insert into resource
+																	(uid, creator_id, created_ts, updated_ts, filename, type, size, memo_id, storage_type, reference, payload)
+																	values
+																	(:uid, :creator_id, :created_ts, :updated_ts, :filename, :type, :size, :memo_id, :storage_type, :reference, :payload)
+																	""")
+															.params(attachmentData)
+															.update();
+												});
+											}
+										}
+										catch (IOException e) {
+											log.error("Failed to read file {}. {}", attachmentFile.getFileName(), e.getMessage());
+										}
+									});
+								}
+							}
 						}
 					}
 				}
@@ -212,9 +269,12 @@ public class GoogleKeepImporter implements ApplicationRunner {
 			long userEditedTimestampUsec,
 			long createdTimestampUsec,
 			List<NoteLabel> labels,
-			List<ListEntry> listContent) {}
+			List<ListEntry> listContent,
+			List<Attachment> attachments) {}
 
 	private record NoteLabel(String name) {}
 
 	private record ListEntry(String text, boolean isChecked) {}
+
+	private record Attachment(String filePath, String mimetype) {}
 }

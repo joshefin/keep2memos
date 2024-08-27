@@ -25,6 +25,9 @@ import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.StringJoiner;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Component
@@ -44,17 +47,17 @@ public class GoogleKeepImporter implements ApplicationRunner {
 		args.getOptionNames().forEach(option ->
 				log.info("Arg: {} --> {}", option, args.getOptionValues(option)));
 
-		String directoryPath = args.getOptionValues("dir").getFirst();
+		Path sourceDirectory = getPathArgument("source-dir", args);
 
-		String databaseUrl = args.getOptionValues("db-url").getFirst();
-		String databasePort = args.getOptionValues("db-port").getFirst();
-		String databaseName = args.getOptionValues("db-name").getFirst();
-		String databaseUsername = args.getOptionValues("db-username").getFirst();
-		String databasePassword = args.getOptionValues("db-password").getFirst();
+		String databaseUrl = getStringArgument("db-url", args);
+		String databasePort = getStringArgument("db-port", args);
+		String databaseName = getStringArgument("db-name", args);
+		String databaseUsername = getStringArgument("db-username", args);
+		String databasePassword = getStringArgument("db-password", args);
 
-		Long userId = Long.valueOf(args.getOptionValues("memos-user").getFirst());
-
-		// DataSourceTransactionManagerAutoConfiguration
+		Long memosUserId = getLongArgument("memos-user", args);
+		Path memosDirectory = getPathArgument("memos-dir", args);
+		String memosResourcesPath = getStringArgument("memos-resources-path", args);
 
 		DataSource dataSource = DataSourceBuilder.create()
 				.url("jdbc:mysql://%s:%s/%s?useUnicode=true&characterEncoding=UTF-8&useSSL=false&useTimezone=true&useLegacyDatetimeCode=false&serverTimezone=UTC"
@@ -71,13 +74,16 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 		jdbcClient = JdbcClient.create(namedParameterJdbcTemplate);
 
-		Path directory = Path.of(directoryPath);
+		log.info("Directory: {}", sourceDirectory);
 
-		log.info("Directory: {}", directory);
+		AtomicLong fileCounter = new AtomicLong(0L);
+		AtomicLong memoCounter = new AtomicLong(0L);
 
-		try (Stream<Path> files = Files.list(directory)) {
+		try (Stream<Path> files = Files.list(sourceDirectory)) {
 			files.filter(file -> file.toString().toLowerCase().endsWith(".json")).forEach(file -> {
 				log.info("Processing file: {}", file.getFileName());
+
+				fileCounter.incrementAndGet();
 
 				byte[] bytes = new byte[0];
 
@@ -107,39 +113,47 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 							data.put("uid", Utils.randomToken());
 
-							data.put("creator_id", userId);
+							data.put("creator_id", memosUserId);
 							data.put("created_ts", createdInstant);
 							data.put("updated_ts", updatedInstant);
 							data.put("row_status", note.isArchived() ? "ARCHIVED" : "NORMAL");
 
-							StringBuilder contentBuilder = new StringBuilder();
+							StringJoiner contentJoiner = new StringJoiner("\n");
 
-							if (note.title() != null && !note.title().isBlank()) {
-								contentBuilder.append("# ");
-								contentBuilder.append(note.title());
-								contentBuilder.append("\n");
-							}
+							if (note.title() != null && !note.title().isBlank())
+								contentJoiner.add("# " + note.title());
 
 							if (note.textContent() != null && !note.textContent().isBlank())
-								contentBuilder.append(note.textContent());
+								contentJoiner.add(note.textContent());
 
 							if (note.listContent() != null && !note.listContent().isEmpty()) {
-								note.listContent()
+								contentJoiner.add(note.listContent()
 										.stream()
 										.filter(entry -> !entry.text().isBlank())
-										.forEach(entry -> {
-											contentBuilder.append("- [");
+										.map(entry -> {
+											StringBuilder entryBuilder = new StringBuilder();
+
+											entryBuilder.append("- [");
 											if (entry.isChecked())
-												contentBuilder.append("x");
+												entryBuilder.append("x");
 											else
-												contentBuilder.append(" ");
-											contentBuilder.append("] ");
-											contentBuilder.append(entry.text());
-											contentBuilder.append("\n");
-										});
+												entryBuilder.append(" ");
+											entryBuilder.append("] ");
+											entryBuilder.append(entry.text());
+
+											return entryBuilder.toString();
+										})
+										.collect(Collectors.joining("\n")));
 							}
 
-							data.put("content", contentBuilder.toString());
+							if (note.labels() != null) {
+								contentJoiner.add(note.labels()
+										.stream()
+										.map(label -> "#" + label.name())
+										.collect(Collectors.joining(" ")));
+							}
+
+							data.put("content", contentJoiner.toString());
 
 							data.put("visibility", "PRIVATE");
 
@@ -156,6 +170,8 @@ public class GoogleKeepImporter implements ApplicationRunner {
 								payload.put("tags", note.labels().stream().map(NoteLabel::name).toList());
 
 							data.put("payload", convertToJson(Map.of("property", payload)));
+
+							log.trace("Memo data: {}", data);
 
 							boolean pinned = note.isPinned();
 
@@ -175,6 +191,8 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 								log.info("Created memo: {}", memoId);
 
+								memoCounter.incrementAndGet();
+
 								if (pinned) {
 									jdbcClient.sql("""
 													insert into memo_organizer
@@ -183,7 +201,7 @@ public class GoogleKeepImporter implements ApplicationRunner {
 													(:memo_id, :user_id, :pinned)
 													""")
 											.param("memo_id", memoId)
-											.param("user_id", userId)
+											.param("user_id", memosUserId)
 											.param("pinned", 1)
 											.update();
 								}
@@ -193,11 +211,10 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 							if (id != null) {
 								if (note.attachments() != null) {
-									// TODO arg
-									Path assetsDirectory = Path.of("/root/.memos/assets");
+									Path resourcesDirectory = memosDirectory.resolve(memosResourcesPath);
 
 									note.attachments().forEach(attachment -> {
-										Path attachmentFile = directory.resolve(attachment.filePath());
+										Path attachmentFile = sourceDirectory.resolve(attachment.filePath());
 
 										try {
 											long attachmentSize = Files.size(attachmentFile);
@@ -205,13 +222,13 @@ public class GoogleKeepImporter implements ApplicationRunner {
 											if (attachmentSize > 0L) {
 												String targetFileName = id + "-" + attachmentFile.getFileName().toString();
 
-												Files.copy(attachmentFile, assetsDirectory.resolve(targetFileName));
+												Files.copy(attachmentFile, resourcesDirectory.resolve(targetFileName));
 
 												transactionTemplate.executeWithoutResult(transactionStatus -> {
 													Map<String, Object> attachmentData = new HashMap<>();
 
 													attachmentData.put("uid", Utils.randomToken());
-													attachmentData.put("creator_id", userId);
+													attachmentData.put("creator_id", memosUserId);
 													attachmentData.put("created_ts", createdInstant);
 													attachmentData.put("updated_ts", updatedInstant);
 													attachmentData.put("filename", attachmentFile.getFileName().toString());
@@ -219,7 +236,7 @@ public class GoogleKeepImporter implements ApplicationRunner {
 													attachmentData.put("size", attachmentSize);
 													attachmentData.put("memo_id", id);
 													attachmentData.put("storage_type", "LOCAL");
-													attachmentData.put("reference", "assets/" + targetFileName);
+													attachmentData.put("reference", Path.of(memosResourcesPath, targetFileName).toString());
 													attachmentData.put("payload", "{}");
 
 													jdbcClient.sql("""
@@ -230,6 +247,8 @@ public class GoogleKeepImporter implements ApplicationRunner {
 																	""")
 															.params(attachmentData)
 															.update();
+
+													log.info("Stored resource {} for memo {}.", targetFileName, id);
 												});
 											}
 										}
@@ -240,12 +259,30 @@ public class GoogleKeepImporter implements ApplicationRunner {
 								}
 							}
 						}
+						else
+							log.warn("Skipping trashed note {}.", file.getFileName());
 					}
+					else
+						log.warn("Failed to read file {}.", file.getFileName());
 				}
+				else
+					log.warn("File {} is empty.", file.getFileName());
 			});
 		}
 
-		log.info("Completed.");
+		log.info("Imported {}/{}.", memoCounter.get(), fileCounter.get());
+	}
+
+	private String getStringArgument(String name, ApplicationArguments args) {
+		return args.getOptionValues(name).getFirst();
+	}
+
+	private Long getLongArgument(String name, ApplicationArguments args) {
+		return Long.parseLong(args.getOptionValues(name).getFirst());
+	}
+
+	private Path getPathArgument(String name, ApplicationArguments args) {
+		return Path.of(args.getOptionValues(name).getFirst());
 	}
 
 	private String convertToJson(Object value) {

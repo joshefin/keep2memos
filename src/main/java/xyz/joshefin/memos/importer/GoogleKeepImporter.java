@@ -47,7 +47,7 @@ public class GoogleKeepImporter implements ApplicationRunner {
 		args.getOptionNames().forEach(option ->
 				log.info("Arg: {} --> {}", option, args.getOptionValues(option)));
 
-		Path sourceDirectory = getPathArgument("source-dir", args);
+		Path keepDirectory = getPathArgument("keep-dir", args);
 
 		String databaseUrl = getStringArgument("db-url", args);
 		String databasePort = getStringArgument("db-port", args);
@@ -55,12 +55,10 @@ public class GoogleKeepImporter implements ApplicationRunner {
 		String databaseUsername = getStringArgument("db-username", args);
 		String databasePassword = getStringArgument("db-password", args);
 
-		Long memosUserId = getLongArgument("memos-user", args);
 		Path memosDirectory = getPathArgument("memos-dir", args);
-		String memosResourcesPath = getStringArgument("memos-resources-path", args);
 
 		DataSource dataSource = DataSourceBuilder.create()
-				.url("jdbc:mysql://%s:%s/%s?useUnicode=true&characterEncoding=UTF-8&useSSL=false&useTimezone=true&useLegacyDatetimeCode=false&serverTimezone=UTC"
+				.url("jdbc:mysql://%s:%s/%s?useUnicode=true&characterEncoding=UTF-8&useSSL=false&useTimezone=true&useLegacyDatetimeCode=false"
 						.formatted(databaseUrl, databasePort, databaseName))
 				.username(databaseUsername)
 				.password(databasePassword)
@@ -74,200 +72,232 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 		jdbcClient = JdbcClient.create(namedParameterJdbcTemplate);
 
-		log.info("Directory: {}", sourceDirectory);
+		log.info("Directory: {}", keepDirectory);
+
+		String memosUserUsername = getStringArgument("memos-user", args);
+
+		Long memosUserId = jdbcClient.sql("select id from user where username = :username")
+				.param("username", memosUserUsername)
+				.query(Long.class)
+				.optional()
+				.orElse(null);
+
+		if (memosUserId == null) {
+			log.error("User {} not found.", memosUserUsername);
+
+			throw new IllegalArgumentException("User not found.");
+		}
+
+		String memosStorageFilepath = jdbcClient.sql("""
+						select json_value(value, '$.filepathTemplate')
+						from system_setting
+						where name = 'STORAGE'
+						""")
+				.query(String.class)
+				.optional()
+				.orElse(null);
+
+		if (memosStorageFilepath == null || memosStorageFilepath.isBlank()) {
+			log.error("Storage directory not defined.");
+
+			throw new IllegalArgumentException("Storage directory not defined.");
+		}
+
+		Path resourcesDirectory = memosDirectory.resolve(Path.of(memosStorageFilepath).getName(0));
 
 		AtomicLong fileCounter = new AtomicLong(0L);
 		AtomicLong memoCounter = new AtomicLong(0L);
 
-		try (Stream<Path> files = Files.list(sourceDirectory)) {
-			files.filter(file -> file.toString().toLowerCase().endsWith(".json")).forEach(file -> {
-				log.info("Processing file: {}", file.getFileName());
+		try (Stream<Path> files = Files.list(keepDirectory)) {
+			files.filter(file -> file.toString().toLowerCase().endsWith(".json"))
+					.forEach(file -> {
+						log.info("Processing file: {}", file.getFileName());
 
-				fileCounter.incrementAndGet();
+						fileCounter.incrementAndGet();
 
-				byte[] bytes = new byte[0];
+						byte[] bytes = new byte[0];
 
-				try {
-					bytes = Files.readAllBytes(file);
-				}
-				catch (IOException e) {
-					log.error("Failed to read file {}: {}", file.getFileName(), e.getMessage());
-				}
+						try {
+							bytes = Files.readAllBytes(file);
+						}
+						catch (IOException e) {
+							log.error("Failed to read file {}: {}", file.getFileName(), e.getMessage());
+						}
 
-				if (bytes.length > 0) {
-					Note note = null;
+						if (bytes.length > 0) {
+							Note note = null;
 
-					try {
-						note = objectMapper.readValue(bytes, Note.class);
-					}
-					catch (IOException e) {
-						log.error("Failed to parse file {}: {}", file.getFileName(), e.getMessage());
-					}
-
-					if (note != null) {
-						if (!note.isTrashed()) {
-							Instant createdInstant = Instant.EPOCH.plus(note.createdTimestampUsec(), ChronoUnit.MICROS);
-							Instant updatedInstant = Instant.EPOCH.plus(note.userEditedTimestampUsec(), ChronoUnit.MICROS);
-
-							Map<String, Object> data = new HashMap<>();
-
-							data.put("uid", Utils.randomToken());
-
-							data.put("creator_id", memosUserId);
-							data.put("created_ts", createdInstant);
-							data.put("updated_ts", updatedInstant);
-							data.put("row_status", note.isArchived() ? "ARCHIVED" : "NORMAL");
-
-							StringJoiner contentJoiner = new StringJoiner("\n");
-
-							if (note.title() != null && !note.title().isBlank())
-								contentJoiner.add("# " + note.title());
-
-							if (note.textContent() != null && !note.textContent().isBlank())
-								contentJoiner.add(note.textContent());
-
-							if (note.listContent() != null && !note.listContent().isEmpty()) {
-								contentJoiner.add(note.listContent()
-										.stream()
-										.filter(entry -> !entry.text().isBlank())
-										.map(entry -> {
-											StringBuilder entryBuilder = new StringBuilder();
-
-											entryBuilder.append("- [");
-											if (entry.isChecked())
-												entryBuilder.append("x");
-											else
-												entryBuilder.append(" ");
-											entryBuilder.append("] ");
-											entryBuilder.append(entry.text());
-
-											return entryBuilder.toString();
-										})
-										.collect(Collectors.joining("\n")));
+							try {
+								note = objectMapper.readValue(bytes, Note.class);
+							}
+							catch (IOException e) {
+								log.error("Failed to parse file {}: {}", file.getFileName(), e.getMessage());
 							}
 
-							if (note.labels() != null) {
-								contentJoiner.add(note.labels()
-										.stream()
-										.map(label -> "#" + label.name())
-										.collect(Collectors.joining(" ")));
-							}
+							if (note != null) {
+								if (!note.isTrashed()) {
+									Instant createdInstant = Instant.EPOCH.plus(note.createdTimestampUsec(), ChronoUnit.MICROS);
+									Instant updatedInstant = Instant.EPOCH.plus(note.userEditedTimestampUsec(), ChronoUnit.MICROS);
 
-							data.put("content", contentJoiner.toString());
+									Map<String, Object> data = new HashMap<>();
 
-							data.put("visibility", "PRIVATE");
+									data.put("uid", Utils.randomToken());
 
-							data.put("tags", "[]");
+									data.put("creator_id", memosUserId);
+									data.put("created_ts", createdInstant);
+									data.put("updated_ts", updatedInstant);
+									data.put("row_status", note.isArchived() ? "ARCHIVED" : "NORMAL");
 
-							Map<String, Object> payload = new HashMap<>();
+									StringJoiner contentJoiner = new StringJoiner("\n");
 
-							if (note.listContent() != null) {
-								payload.put("hasTaskList", true);
-								payload.put("hasIncompleteTasks", note.listContent().stream().anyMatch(e -> !e.isChecked()));
-							}
+									if (note.title() != null && !note.title().isBlank())
+										contentJoiner.add("# " + note.title());
 
-							if (note.labels() != null)
-								payload.put("tags", note.labels().stream().map(NoteLabel::name).toList());
+									if (note.textContent() != null && !note.textContent().isBlank())
+										contentJoiner.add(note.textContent());
 
-							data.put("payload", convertToJson(Map.of("property", payload)));
+									if (note.listContent() != null && !note.listContent().isEmpty()) {
+										contentJoiner.add(note.listContent()
+												.stream()
+												.filter(entry -> !entry.text().isBlank())
+												.map(entry -> {
+													StringBuilder entryBuilder = new StringBuilder();
 
-							log.trace("Memo data: {}", data);
+													entryBuilder.append("- [");
+													if (entry.isChecked())
+														entryBuilder.append("x");
+													else
+														entryBuilder.append(" ");
+													entryBuilder.append("] ");
+													entryBuilder.append(entry.text());
 
-							boolean pinned = note.isPinned();
+													return entryBuilder.toString();
+												})
+												.collect(Collectors.joining("\n")));
+									}
 
-							Long id = transactionTemplate.execute(transactionStatus -> {
-								GeneratedKeyHolder keyHolder = new GeneratedKeyHolder();
+									if (note.labels() != null) {
+										contentJoiner.add(note.labels()
+												.stream()
+												.map(label -> "#" + label.name())
+												.collect(Collectors.joining(" ")));
+									}
 
-								jdbcClient.sql("""
-												insert into memo
-												(uid, creator_id, created_ts, updated_ts, row_status, content, visibility, tags, payload)
-												values
-												(:uid, :creator_id, :created_ts, :updated_ts, :row_status, :content, :visibility, :tags, :payload)
-												""")
-										.params(data)
-										.update(keyHolder);
+									data.put("content", contentJoiner.toString());
 
-								long memoId = keyHolder.getKey().longValue();
+									data.put("visibility", "PRIVATE");
 
-								log.info("Created memo: {}", memoId);
+									data.put("tags", "[]");
 
-								memoCounter.incrementAndGet();
+									Map<String, Object> payload = new HashMap<>();
 
-								if (pinned) {
-									jdbcClient.sql("""
-													insert into memo_organizer
-													(memo_id, user_id, pinned)
-													values
-													(:memo_id, :user_id, :pinned)
-													""")
-											.param("memo_id", memoId)
-											.param("user_id", memosUserId)
-											.param("pinned", 1)
-											.update();
-								}
+									if (note.listContent() != null) {
+										payload.put("hasTaskList", true);
+										payload.put("hasIncompleteTasks", note.listContent().stream().anyMatch(e -> !e.isChecked()));
+									}
 
-								return memoId;
-							});
+									if (note.labels() != null)
+										payload.put("tags", note.labels().stream().map(NoteLabel::name).toList());
 
-							if (id != null) {
-								if (note.attachments() != null) {
-									Path resourcesDirectory = memosDirectory.resolve(memosResourcesPath);
+									data.put("payload", convertToJson(Map.of("property", payload)));
 
-									note.attachments().forEach(attachment -> {
-										Path attachmentFile = sourceDirectory.resolve(attachment.filePath());
+									log.trace("Memo data: {}", data);
 
-										try {
-											long attachmentSize = Files.size(attachmentFile);
+									boolean pinned = note.isPinned();
 
-											if (attachmentSize > 0L) {
-												String targetFileName = id + "-" + attachmentFile.getFileName().toString();
+									Long id = transactionTemplate.execute(transactionStatus -> {
+										GeneratedKeyHolder keyHolder = new GeneratedKeyHolder();
 
-												Files.copy(attachmentFile, resourcesDirectory.resolve(targetFileName));
+										jdbcClient.sql("""
+														insert into memo
+														(uid, creator_id, created_ts, updated_ts, row_status, content, visibility, tags, payload)
+														values
+														(:uid, :creator_id, :created_ts, :updated_ts, :row_status, :content, :visibility, :tags, :payload)
+														""")
+												.params(data)
+												.update(keyHolder);
 
-												transactionTemplate.executeWithoutResult(transactionStatus -> {
-													Map<String, Object> attachmentData = new HashMap<>();
+										long memoId = keyHolder.getKey().longValue();
 
-													attachmentData.put("uid", Utils.randomToken());
-													attachmentData.put("creator_id", memosUserId);
-													attachmentData.put("created_ts", createdInstant);
-													attachmentData.put("updated_ts", updatedInstant);
-													attachmentData.put("filename", attachmentFile.getFileName().toString());
-													attachmentData.put("type", attachment.mimetype());
-													attachmentData.put("size", attachmentSize);
-													attachmentData.put("memo_id", id);
-													attachmentData.put("storage_type", "LOCAL");
-													attachmentData.put("reference", Path.of(memosResourcesPath, targetFileName).toString());
-													attachmentData.put("payload", "{}");
+										log.info("Created memo: {}", memoId);
 
-													jdbcClient.sql("""
-																	insert into resource
-																	(uid, creator_id, created_ts, updated_ts, filename, type, size, memo_id, storage_type, reference, payload)
-																	values
-																	(:uid, :creator_id, :created_ts, :updated_ts, :filename, :type, :size, :memo_id, :storage_type, :reference, :payload)
-																	""")
-															.params(attachmentData)
-															.update();
+										memoCounter.incrementAndGet();
 
-													log.info("Stored resource {} for memo {}.", targetFileName, id);
-												});
-											}
+										if (pinned) {
+											jdbcClient.sql("""
+															insert into memo_organizer
+															(memo_id, user_id, pinned)
+															values
+															(:memo_id, :user_id, :pinned)
+															""")
+													.param("memo_id", memoId)
+													.param("user_id", memosUserId)
+													.param("pinned", 1)
+													.update();
 										}
-										catch (IOException e) {
-											log.error("Failed to read file {}. {}", attachmentFile.getFileName(), e.getMessage());
-										}
+
+										return memoId;
 									});
+
+									if (id != null) {
+										if (note.attachments() != null) {
+											note.attachments().forEach(attachment -> {
+												Path attachmentFile = keepDirectory.resolve(attachment.filePath());
+
+												try {
+													long attachmentSize = Files.size(attachmentFile);
+
+													if (attachmentSize > 0L) {
+														String targetFileName = id + "-" + attachmentFile.getFileName().toString();
+
+														Path targetFile = resourcesDirectory.resolve(targetFileName);
+
+														Files.copy(attachmentFile, resourcesDirectory.resolve(targetFileName));
+
+														transactionTemplate.executeWithoutResult(transactionStatus -> {
+															Map<String, Object> attachmentData = new HashMap<>();
+
+															attachmentData.put("uid", Utils.randomToken());
+															attachmentData.put("creator_id", memosUserId);
+															attachmentData.put("created_ts", createdInstant);
+															attachmentData.put("updated_ts", updatedInstant);
+															attachmentData.put("filename", attachmentFile.getFileName().toString());
+															attachmentData.put("type", attachment.mimetype());
+															attachmentData.put("size", attachmentSize);
+															attachmentData.put("memo_id", id);
+															attachmentData.put("storage_type", "LOCAL");
+															attachmentData.put("reference", memosDirectory.relativize(targetFile).toString());
+															attachmentData.put("payload", "{}");
+
+															jdbcClient.sql("""
+																			insert into resource
+																			(uid, creator_id, created_ts, updated_ts, filename, type, size, memo_id, storage_type, reference, payload)
+																			values
+																			(:uid, :creator_id, :created_ts, :updated_ts, :filename, :type, :size, :memo_id, :storage_type, :reference, :payload)
+																			""")
+																	.params(attachmentData)
+																	.update();
+
+															log.info("Stored resource {} for memo {}.", targetFileName, id);
+														});
+													}
+												}
+												catch (IOException e) {
+													log.error("Failed to read file {}. {}", attachmentFile.getFileName(), e.getMessage());
+												}
+											});
+										}
+									}
 								}
+								else
+									log.warn("Skipping trashed note {}.", file.getFileName());
 							}
+							else
+								log.warn("Failed to read file {}.", file.getFileName());
 						}
 						else
-							log.warn("Skipping trashed note {}.", file.getFileName());
-					}
-					else
-						log.warn("Failed to read file {}.", file.getFileName());
-				}
-				else
-					log.warn("File {} is empty.", file.getFileName());
-			});
+							log.warn("File {} is empty.", file.getFileName());
+					});
 		}
 
 		log.info("Imported {}/{}.", memoCounter.get(), fileCounter.get());
@@ -275,10 +305,6 @@ public class GoogleKeepImporter implements ApplicationRunner {
 
 	private String getStringArgument(String name, ApplicationArguments args) {
 		return args.getOptionValues(name).getFirst();
-	}
-
-	private Long getLongArgument(String name, ApplicationArguments args) {
-		return Long.parseLong(args.getOptionValues(name).getFirst());
 	}
 
 	private Path getPathArgument(String name, ApplicationArguments args) {

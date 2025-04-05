@@ -11,10 +11,21 @@
     <name>memos-keep-importer</name>
     <description>Import Google Keep to Memos</description>
 
+    <developers>
+        <developer>
+            <id>joshefin</id>
+            <name>Željko Ziriković</name>
+        </developer>
+    </developers>
+
+    <licenses>
+        <license/>
+    </licenses>
+
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.4</version>
+        <version>3.4.4</version>
         <relativePath/>
     </parent>
 

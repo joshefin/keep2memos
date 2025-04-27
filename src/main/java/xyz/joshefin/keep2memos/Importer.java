@@ -1,14 +1,9 @@
-package xyz.joshefin.memos.importer;
+package xyz.joshefin.keep2memos;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
-import org.springframework.stereotype.Component;
+import com.fasterxml.jackson.databind.SerializationFeature;
 
 import java.io.IOException;
 import java.net.URI;
@@ -26,23 +21,47 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-@Component
-public class GoogleKeepImporter2 implements ApplicationRunner {
+public class Importer {
 
-	private static final Logger log = LoggerFactory.getLogger(GoogleKeepImporter2.class);
+	private static final String KEEP_DIR_OPTION = "keep-dir";
+	private static final String MEMOS_URL_OPTION = "memos-url";
+	private static final String MEMOS_TOKEN_OPTION = "memos-token";
 
-	@Autowired
-	private ObjectMapper objectMapper;
+	private final ObjectMapper objectMapper;
 
-	@Override
-	public void run(ApplicationArguments args) throws Exception {
-		args.getOptionNames().forEach(option ->
-				log.info("Arg: {} --> {}", option, args.getOptionValues(option)));
+	public Importer() {
+		objectMapper = new ObjectMapper();
 
-		Path keepDirectory = getPathArgument("keep-dir", args);
+		objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+		objectMapper.disable(SerializationFeature.WRITE_DURATIONS_AS_TIMESTAMPS);
+	}
 
-		String memosUrl = getStringArgument("memos-url", args);
-		String memosAccessToken = getStringArgument("memos-token", args);
+	public static void main(String[] args) {
+		Importer importer = new Importer();
+
+		try {
+			importer.run(args);
+		}
+		catch (Exception e) {
+			System.err.println(e.getMessage());
+		}
+	}
+
+	public void run(String[] args) throws Exception {
+		Map<String, String> params = parseParams(args);
+
+		List.of(KEEP_DIR_OPTION, MEMOS_URL_OPTION, MEMOS_TOKEN_OPTION)
+				.forEach(option -> {
+					if (!params.containsKey(option))
+						System.err.println("Missing '" + option + "' option.");
+					else if (params.getOrDefault(option, "").isBlank())
+						System.err.println("Option '" + option + "' is invalid.");
+				});
+
+		Path keepDirectory = Path.of(params.get(KEEP_DIR_OPTION));
+
+		String memosUrl = params.get(MEMOS_URL_OPTION);
+		String memosAccessToken = params.get(MEMOS_TOKEN_OPTION);
 
 		AtomicLong fileCounter = new AtomicLong(0L);
 		AtomicLong memoCounter = new AtomicLong(0L);
@@ -55,7 +74,7 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 			try (Stream<Path> files = Files.list(keepDirectory)) {
 				files.filter(file -> file.toString().toLowerCase().endsWith(".json"))
 						.forEach(file -> {
-							log.info("Processing file: {}", file.getFileName());
+							System.out.println("Processing file: " + file.getFileName());
 
 							fileCounter.incrementAndGet();
 
@@ -65,7 +84,7 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 								bytes = Files.readAllBytes(file);
 							}
 							catch (IOException e) {
-								log.error("Failed to read file {}: {}", file.getFileName(), e.getMessage());
+								System.err.printf("Failed to read file %s: %s%n", file.getFileName(), e.getMessage());
 							}
 
 							if (bytes.length > 0) {
@@ -75,7 +94,7 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 									note = objectMapper.readValue(bytes, Note.class);
 								}
 								catch (IOException e) {
-									log.error("Failed to parse file {}: {}", file.getFileName(), e.getMessage());
+									System.err.printf("Failed to parse file %s: %s%n", file.getFileName(), e.getMessage());
 								}
 
 								if (note != null) {
@@ -120,24 +139,10 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 													.collect(Collectors.joining(" ")));
 										}
 
-										//createMemoData.put("state", "NORMAL");
 										createMemoData.put("content", contentJoiner.toString());
 										createMemoData.put("visibility", "PRIVATE");
 
-										// TODO izgleda da ne treba
-									/*
-									if (note.listContent() != null) {
-										data.put("property", Map.of(
-												"hasTaskList", true,
-												"hasIncompleteTasks", note.listContent().stream().anyMatch(e -> !e.isChecked())));
-									}
-									*/
-
-										// log.trace("Memo data: {}", data);
-
 										String createMemoJson = convertToJson(createMemoData);
-
-										log.trace("Create memo JSON: {}", createMemoJson);
 
 										if (createMemoJson != null) {
 											try {
@@ -152,7 +157,7 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 												if (createMemoResponse.statusCode() == 200) {
 													Map<String, Object> createMemoResponseData = convertToMap(createMemoResponse.body());
 
-													log.info("Created memo {}.", createMemoResponseData.get("name"));
+													System.out.println("Created memo: " + createMemoResponseData.get("name"));
 
 													memoCounter.incrementAndGet();
 
@@ -164,8 +169,6 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 
 													String updateMemoJson = convertToJson(updateMemoData);
 
-													log.trace("Update memo JSON: {}", updateMemoJson);
-
 													if (updateMemoJson != null) {
 														HttpResponse<String> updateMemoResponse = httpClient.send(HttpRequest.newBuilder()
 																		.uri(URI.create(memosUrl).resolve("/api/v1/" + createMemoResponseData.get("name")))
@@ -176,10 +179,11 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 																HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
 														if (updateMemoResponse.statusCode() == 200) {
-															log.info("Updated memo {}.", createMemoResponseData.get("name"));
+															System.out.println("Updated memo: " + createMemoResponseData.get("name"));
 														}
 														else
-															log.error("Failed to update memo. Response: {} - {}",
+															System.err.printf(
+																	"Failed to update memo. Response: %s - %s%n",
 																	updateMemoResponse.statusCode(),
 																	updateMemoResponse.body().lines().collect(Collectors.joining(" | ")));
 													}
@@ -205,7 +209,7 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 																		resource.put("size", attachmentSize);
 																	}
 																	catch (IOException e) {
-																		log.error("Failed to read file {}. {}", attachmentFile.getFileName(), e.getMessage());
+																		System.err.printf("Failed to read file %s. %s%n", attachmentFile.getFileName(), e.getMessage());
 
 																		return null;
 																	}
@@ -230,16 +234,16 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 																				HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
 																		if (resourceResponse.statusCode() == 200) {
-																			log.info("Created resource.");
+																			System.out.println("Created resource.");
 																		}
 																		else {
-																			log.error("Failed to create resource. Response: {} - {}",
+																			System.err.printf("Failed to create resource. Response: %s - %s%n",
 																					resourceResponse.statusCode(),
 																					resourceResponse.body().lines().collect(Collectors.joining(" | ")));
 																		}
 																	}
 																	catch (IOException | InterruptedException e) {
-																		log.error("Failed to create resource. {}", e.getMessage(), e);
+																		System.err.println("Failed to create resource. " + e.getMessage());
 																	}
 																}
 															});
@@ -247,36 +251,41 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 													}
 												}
 												else
-													log.error("Failed to create memo. Response: {} - {}",
+													System.err.printf("Failed to create memo. Response: %s - %s%n",
 															createMemoResponse.statusCode(),
 															createMemoResponse.body().lines().collect(Collectors.joining(" | ")));
 											}
 											catch (IOException | InterruptedException e) {
-												log.error("Failed to create memo. {}", e.getMessage(), e);
+												System.err.println("Failed to create memo. " + e.getMessage());
 											}
 										}
 									}
-									else
-										log.warn("Skipping trashed note {}.", file.getFileName());
 								}
 								else
-									log.warn("Failed to read file {}.", file.getFileName());
+									System.err.println("Failed to read file: " + file.getFileName());
 							}
 							else
-								log.warn("File {} is empty.", file.getFileName());
+								System.err.printf("File %s is empty.%n", file.getFileName());
 						});
 			}
 		}
 
-		log.info("Imported {}/{}.", memoCounter.get(), fileCounter.get());
+		System.out.printf("Imported %s/%s.%n", memoCounter.get(), fileCounter.get());
 	}
 
-	private String getStringArgument(String name, ApplicationArguments args) {
-		return args.getOptionValues(name).getFirst();
-	}
+	private Map<String, String> parseParams(String[] args) {
+		Map<String, String> params = new HashMap<>();
 
-	private Path getPathArgument(String name, ApplicationArguments args) {
-		return Path.of(args.getOptionValues(name).getFirst());
+		String option = null;
+
+		for (String arg : args) {
+			if (arg.startsWith("--"))
+				option = arg.substring(2);
+			else if (option != null)
+				params.put(option, arg);
+		}
+
+		return params;
 	}
 
 	private String convertToJson(Object value) {
@@ -284,7 +293,7 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 			return objectMapper.writeValueAsString(value);
 		}
 		catch (JsonProcessingException e) {
-			log.error("Failed to serialize value as json. {}", e.getMessage());
+			System.err.println("Failed to serialize value as json. " + e.getMessage());
 		}
 
 		return null;
@@ -295,7 +304,7 @@ public class GoogleKeepImporter2 implements ApplicationRunner {
 			return objectMapper.readValue(json, new TypeReference<>() {});
 		}
 		catch (JsonProcessingException e) {
-			log.error("Failed to deserialize json. {}", e.getMessage());
+			System.err.println("Failed to deserialize json. " + e.getMessage());
 		}
 
 		return Collections.emptyMap();

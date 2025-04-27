@@ -1,4 +1,0 @@
-${Ansi.GREEN}             _ _
-${Ansi.GREEN}[]/eep  to  //\/\emos
-${Ansi.GREEN}  `
-${Ansi.DEFAULT}

@@ -1,4 +1,4 @@
-package xyz.joshefin.memos.importer;
+package xyz.joshefin.keep2memos;
 
 import java.math.BigInteger;
 import java.security.SecureRandom;

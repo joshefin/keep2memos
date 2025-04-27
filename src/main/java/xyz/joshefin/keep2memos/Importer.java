@@ -50,13 +50,20 @@ public class Importer {
 	public void run(String[] args) throws Exception {
 		Map<String, String> params = parseParams(args);
 
-		List.of(KEEP_DIR_OPTION, MEMOS_URL_OPTION, MEMOS_TOKEN_OPTION)
-				.forEach(option -> {
-					if (!params.containsKey(option))
-						System.err.println("Missing '" + option + "' option.");
-					else if (params.getOrDefault(option, "").isBlank())
-						System.err.println("Option '" + option + "' is invalid.");
-				});
+		if (!Stream.of(KEEP_DIR_OPTION, MEMOS_URL_OPTION, MEMOS_TOKEN_OPTION).allMatch(option -> {
+			if (!params.containsKey(option)) {
+				System.err.println("Missing '" + option + "' option.");
+				return false;
+			}
+			else if (params.getOrDefault(option, "").isBlank()) {
+				System.err.println("Option '" + option + "' is invalid.");
+				return false;
+			}
+
+			return true;
+		})) {
+			return;
+		}
 
 		Path keepDirectory = Path.of(params.get(KEEP_DIR_OPTION));
 

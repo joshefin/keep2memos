@@ -169,7 +169,7 @@ public class Importer {
 												if (createMemoResponse.statusCode() == 200) {
 													Map<String, Object> createMemoResponseData = convertToMap(createMemoResponse.body());
 
-													System.out.println("Created memo: " + createMemoResponseData.get("name"));
+													// System.out.println("Created memo: " + createMemoResponseData.get("name"));
 
 													memoCounter.incrementAndGet();
 
@@ -190,14 +190,12 @@ public class Importer {
 																		.build(),
 																HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
-														if (updateMemoResponse.statusCode() == 200) {
-															System.out.println("Updated memo: " + createMemoResponseData.get("name"));
-														}
-														else
+														if (updateMemoResponse.statusCode() != 200) {
 															System.err.printf(
 																	"Failed to update memo. Response: %s - %s%n",
 																	updateMemoResponse.statusCode(),
 																	updateMemoResponse.body().lines().collect(Collectors.joining(" | ")));
+														}
 													}
 
 													if (note.attachments() != null) {
@@ -272,6 +270,8 @@ public class Importer {
 											}
 										}
 									}
+									else
+										System.out.println("Skipping trashed note.");
 								}
 								else
 									System.err.println("Failed to read file: " + file.getFileName());

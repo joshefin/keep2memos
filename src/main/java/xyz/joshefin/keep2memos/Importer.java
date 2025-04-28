@@ -179,6 +179,9 @@ public class Importer {
 													updateMemoData.put("updateTime", updatedInstant);
 													updateMemoData.put("pinned", note.isPinned());
 
+													if (note.isArchived())
+														updateMemoData.put("state", "ARCHIVED");
+
 													String updateMemoJson = convertToJson(updateMemoData);
 
 													if (updateMemoJson != null) {
@@ -243,10 +246,7 @@ public class Importer {
 																						.build(),
 																				HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
-																		if (resourceResponse.statusCode() == 200) {
-																			System.out.println("Created resource.");
-																		}
-																		else {
+																		if (resourceResponse.statusCode() != 200) {
 																			System.err.printf("Failed to create resource. Response: %s - %s%n",
 																					resourceResponse.statusCode(),
 																					resourceResponse.body().lines().collect(Collectors.joining(" | ")));

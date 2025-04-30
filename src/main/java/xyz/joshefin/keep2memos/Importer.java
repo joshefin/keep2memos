@@ -76,7 +76,9 @@ public class Importer {
 		String memosAccessToken = params.get(MEMOS_TOKEN_OPTION);
 
 		AtomicLong fileCounter = new AtomicLong(0L);
-		AtomicLong memoCounter = new AtomicLong(0L);
+		AtomicLong successCounter = new AtomicLong(0L);
+		AtomicLong failCounter = new AtomicLong(0L);
+		AtomicLong skipCounter = new AtomicLong(0L);
 
 		try (HttpClient httpClient = HttpClient.newBuilder()
 				.version(HttpClient.Version.HTTP_1_1)
@@ -171,8 +173,6 @@ public class Importer {
 
 													// System.out.println("Created memo: " + createMemoResponseData.get("name"));
 
-													memoCounter.incrementAndGet();
-
 													Map<String, Object> updateMemoData = new HashMap<>();
 
 													updateMemoData.put("createTime", createdInstant);
@@ -193,7 +193,12 @@ public class Importer {
 																		.build(),
 																HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
-														if (updateMemoResponse.statusCode() != 200) {
+														if (updateMemoResponse.statusCode() == 200) {
+															successCounter.incrementAndGet();
+														}
+														else {
+															failCounter.incrementAndGet();
+
 															System.err.printf(
 																	"Failed to update memo. Response: %s - %s%n",
 																	updateMemoResponse.statusCode(),
@@ -260,29 +265,45 @@ public class Importer {
 														}
 													}
 												}
-												else
+												else {
+													failCounter.incrementAndGet();
+
 													System.err.printf("Failed to create memo. Response: %s - %s%n",
 															createMemoResponse.statusCode(),
 															createMemoResponse.body().lines().collect(Collectors.joining(" | ")));
+												}
 											}
 											catch (IOException | InterruptedException e) {
 												System.err.println("Failed to create memo. " + e.getMessage());
 											}
 										}
 									}
-									else
+									else {
+										skipCounter.incrementAndGet();
+
 										System.out.println("Skipping trashed note.");
+									}
 								}
-								else
+								else {
+									failCounter.incrementAndGet();
+
 									System.err.println("Failed to read file: " + file.getFileName());
+								}
 							}
-							else
+							else {
+								failCounter.incrementAndGet();
+
 								System.err.printf("File %s is empty.%n", file.getFileName());
+							}
 						});
 			}
 		}
 
-		System.out.printf("Imported %s/%s.%n", memoCounter.get(), fileCounter.get());
+		System.out.println();
+		System.out.println("Files: " + fileCounter.get());
+		System.out.println("Successful: " + successCounter.get());
+		System.out.println("Failed: " + failCounter.get());
+		System.out.println("Skipped: " + skipCounter.get());
 	}
 
 	private Map<String, String> parseParams(String[] args) {

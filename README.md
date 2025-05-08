@@ -6,7 +6,7 @@ Import Google Keep notes to [memos](https://www.usememos.com/).
 
 1. Install Java version 21 or newer, if you don't have it.
 2. Export an archive of Google Keep content using [Google Takeout](https://takeout.google.com/).
-3. Download the latest release of keep2memos (a _jar_ file).
+3. Download the latest [release](https://github.com/joshefin/keep2memos/releases) of keep2memos (a _jar_ file).
 4. Extract the Google Takeout archive to any directory and save the path to the Keep subdirectory.
 5. Open memos in your browser, go to _Settings > My Account_ and create a new Access token.
 6. Run keep2memos in your Terminal/Command Prompt like in the following example:
